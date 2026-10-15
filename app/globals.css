@@ -2,10 +2,21 @@
 
 @theme inline {
   --font-sans: var(--font-geist-sans), var(--font-thai), ui-sans-serif, system-ui, sans-serif;
+  /* Per-bill accent color, set as CSS variables by themeStyle() */
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ring: var(--accent-ring);
+  --color-accent-ink: var(--accent-ink);
 }
 
 :root {
   color-scheme: light;
+  --accent: #059669;
+  --accent-strong: #047857;
+  --accent-soft: #ecfdf5;
+  --accent-ring: #6ee7b7;
+  --accent-ink: #065f46;
 }
 
 html {

@@ -1,20 +1,13 @@
-import { CATEGORIES, type Category } from "@/lib/types";
-import {
-  billForAdmin,
-  cleanText,
-  error,
-  json,
-  parseBahtToSatang,
-  randomId,
-  readJson,
-} from "@/lib/server";
+import { billForAdmin, cleanText, error, json, readJson } from "@/lib/server";
 import { store } from "@/lib/store";
+import { aiEnabled } from "@/lib/host-auth";
 import { guestId } from "@/lib/seed-data";
+import { applySettings, parseItems, type SettingsInput } from "@/lib/validate";
 
 async function adminPayload(token: string) {
   const bill = await billForAdmin(token);
   if (!bill) return null;
-  return { bill, people: await store.getPeople(bill.id) };
+  return { bill, people: await store.getPeople(bill.id), aiEnabled: aiEnabled() };
 }
 
 export async function GET(_req: Request, ctx: RouteContext<"/api/admin/[token]">) {
@@ -24,9 +17,8 @@ export async function GET(_req: Request, ctx: RouteContext<"/api/admin/[token]">
 }
 
 type Action =
-  | { action: "settings"; locked?: boolean; title?: string; extraBaht?: number | string; extraLabel?: string; payment?: Record<string, string> }
-  | { action: "addItem"; name: string; category: Category; qty: number; unitPriceBaht: number | string }
-  | { action: "removeItem"; itemId: string }
+  | ({ action: "settings" } & SettingsInput)
+  | { action: "replaceItems"; items: unknown }
   | { action: "itemShared"; itemId: string; sharedByAll: boolean }
   | { action: "paid"; personId: string; paid: boolean }
   | { action: "removePerson"; personId: string }
@@ -41,44 +33,15 @@ export async function POST(req: Request, ctx: RouteContext<"/api/admin/[token]">
 
   switch (body.action) {
     case "settings": {
-      if (typeof body.locked === "boolean") bill.locked = body.locked;
-      if (body.title !== undefined) bill.title = cleanText(body.title, 60) || bill.title;
-      if (body.extraBaht !== undefined) {
-        const s = parseBahtToSatang(body.extraBaht);
-        if (s === null) return error("Invalid extra amount", 400);
-        bill.extraSatang = s;
-      }
-      if (body.extraLabel !== undefined) bill.extraLabel = cleanText(body.extraLabel, 40) || "Tip";
-      if (body.payment) {
-        bill.payment = {
-          promptpay: cleanText(body.payment.promptpay, 20).replace(/[^0-9]/g, ""),
-          bankName: cleanText(body.payment.bankName, 40),
-          accountNo: cleanText(body.payment.accountNo, 30),
-          accountName: cleanText(body.payment.accountName, 60),
-        };
-      }
+      const problem = applySettings(bill, body);
+      if (problem) return error(problem, 400);
       break;
     }
-    case "addItem": {
-      const name = cleanText(body.name, 60);
-      const qty = Math.floor(Number(body.qty));
-      const price = parseBahtToSatang(body.unitPriceBaht);
-      if (!name || !(qty >= 1 && qty <= 50) || !price || !CATEGORIES.includes(body.category))
-        return error("Invalid item", 400);
-      bill.items.push({
-        id: `m-${randomId(6)}`,
-        name,
-        category: body.category,
-        qty,
-        unitPriceSatang: price,
-        manual: true,
-      });
-      break;
-    }
-    case "removeItem": {
-      const item = bill.items.find((i) => i.id === body.itemId);
-      if (!item?.manual) return error("Only manual items can be removed", 400);
-      bill.items = bill.items.filter((i) => i.id !== body.itemId);
+    case "replaceItems": {
+      // Ticks on removed items (or units beyond a lowered qty) are simply ignored.
+      const items = parseItems(body.items, bill.items);
+      if (typeof items === "string") return error(items, 400);
+      bill.items = items;
       break;
     }
     case "itemShared": {

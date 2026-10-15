@@ -1,38 +1,60 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore } from "react";
-import { computeBill, formatTHB, withRoster } from "@/lib/money";
+import Link from "next/link";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { billCharges, computeBill, formatTHB, withRoster } from "@/lib/money";
 import { sendJson, usePolling } from "@/lib/client";
-import { CATEGORIES, type Bill, type Category, type Person } from "@/lib/types";
+import { rememberBill, rememberFriends, saveProfile } from "@/lib/host-storage";
+import { toDraft, toPayload, type DraftItem } from "@/lib/receipt";
+import { themeStyle } from "@/lib/theme";
+import type { Bill, Category, PaymentInfo, Person, ThemeColor } from "@/lib/types";
 import { Avatars, Card, CopyButton, Switch } from "@/components/ui";
+import ItemsEditor from "@/components/host/ItemsEditor";
+import {
+  ChargesFields,
+  Field,
+  PaymentFields,
+  ThemePicker,
+  inputCls,
+  primaryCls,
+  promptpayValid,
+  secondaryCls,
+  type ChargesValue,
+} from "@/components/host/form";
 
-type AdminPayload = { bill: Bill; people: Person[] };
+type AdminPayload = { bill: Bill; people: Person[]; aiEnabled: boolean };
+type Act = (body: Record<string, unknown>) => Promise<boolean>;
 
 const CAT_LABEL: Record<Category, string> = { food: "Food", drinks: "Drinks", alcohol: "Wine/Alcohol", water: "Water" };
+const noSubscribe = () => () => {};
 
 export default function AdminApp({ token }: { token: string }) {
   const api = `/api/admin/${token}`;
   const { data, setData, status } = usePolling<AdminPayload>(api, 5000);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const origin = useSyncExternalStore(
-    () => () => {},
-    () => window.location.origin,
-    () => "",
-  );
+  const origin = useSyncExternalStore(noSubscribe, () => window.location.origin, () => "");
+  const justCreated = useSyncExternalStore(noSubscribe, () => window.location.search.includes("new=1"), () => false);
 
   const result = useMemo(
-    () => (data ? computeBill(data.bill.items, withRoster(data.bill.roster, data.people), data.bill.extraSatang) : null),
+    () => (data ? computeBill(data.bill.items, withRoster(data.bill.roster, data.people), billCharges(data.bill)) : null),
     [data],
   );
 
+  // Keep this bill in "My bills" on this phone (also picks up bills made elsewhere).
+  const bill = data?.bill;
+  useEffect(() => {
+    if (bill) rememberBill({ id: bill.id, adminToken: token, title: bill.title, emoji: bill.emoji, date: bill.date });
+  }, [bill, token]);
+
   if (status === "notfound") return <p className="p-8 text-center text-stone-500">Admin link not found.</p>;
-  if (!data || !result) return <p className="p-8 text-center text-stone-500">Loading…</p>;
+  if (!data || !result || !bill) return <p className="p-8 text-center text-stone-500">Loading…</p>;
 
-  const { bill, people } = data;
+  const { people } = data;
   const shareUrl = `${origin}/b/${bill.id}`;
+  const shareText = `${bill.emoji ?? "🧾"} ${bill.title}: tick what you had and see what you owe 👉 ${shareUrl}`;
 
-  async function act(body: Record<string, unknown>) {
+  const act: Act = async (body) => {
     setBusy(true);
     setErr("");
     try {
@@ -44,27 +66,38 @@ export default function AdminApp({ token }: { token: string }) {
     } finally {
       setBusy(false);
     }
-  }
+  };
 
-  const expected = result.itemsTotalSatang + bill.extraSatang;
-  const balanced = result.sharesTotalSatang === expected;
-  const receiptMatches = result.itemsTotalSatang === bill.receiptTotalSatang;
+  const covered = result.unclaimedSatang === 0 && result.sharesTotalSatang === result.grandTotalSatang;
+  const restaurantTotal = result.itemsTotalSatang + result.serviceSatang + result.vatSatang;
+  const receiptDiff = bill.receiptTotalSatang ? restaurantTotal - bill.receiptTotalSatang : 0;
   const paidSatang = result.people.filter((p) => p.paid).reduce((s, p) => s + p.roundedSatang, 0);
   const sorted = [...result.people].sort((a, b) => a.name.localeCompare(b.name, "th"));
   const pickedIds = new Set(people.filter((p) => p.unitIds.length > 0).map((p) => p.id));
   const waiting = sorted.filter((p) => !pickedIds.has(p.id));
+  const servicePct = (bill.serviceBp ?? 0) / 100;
 
   return (
-    <main className="mx-auto w-full max-w-3xl space-y-4 px-4 pt-5 pb-16">
+    <main className="mx-auto w-full max-w-3xl space-y-4 px-4 pt-5 pb-16" style={themeStyle(bill.color)}>
       <header>
-        <p className="text-sm font-medium text-emerald-700">Host view · keep this link secret</p>
-        <h1 className="text-2xl font-bold">{bill.title}</h1>
+        <Link href="/" className="text-sm text-stone-500">
+          ← My bills
+        </Link>
+        <p className="mt-1 text-sm font-medium text-accent-ink">Host view · keep this link secret</p>
+        <h1 className="text-2xl font-bold">
+          {bill.emoji} {bill.title}
+        </h1>
         <p className="text-sm text-stone-500">
-          {bill.date} · {bill.guests} guests · receipt {formatTHB(bill.receiptTotalSatang)} incl. VAT
+          {bill.date} · {bill.roster?.length || bill.guests} guests · {formatTHB(result.grandTotalSatang)}
         </p>
       </header>
 
       {err && <p className="rounded-xl bg-rose-100 px-4 py-2 text-sm text-rose-800">{err}</p>}
+      {justCreated && (
+        <p className="rounded-xl bg-accent-soft px-4 py-3 text-sm font-medium text-accent-ink">
+          🎉 Bill created. Send the link below to the group. This admin page is saved under “My bills” on this phone.
+        </p>
+      )}
 
       <Card>
         <p className="mb-1 text-sm font-semibold">Share this link with friends</p>
@@ -72,6 +105,14 @@ export default function AdminApp({ token }: { token: string }) {
           <code className="min-w-0 flex-1 truncate rounded-lg bg-stone-100 px-3 py-2.5 text-sm">{shareUrl}</code>
           <CopyButton text={shareUrl} />
         </div>
+        <a
+          href={`https://line.me/R/share?text=${encodeURIComponent(shareText)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-2 flex h-12 items-center justify-center rounded-xl bg-[#06C755] font-semibold text-white active:opacity-90"
+        >
+          Send in LINE
+        </a>
         <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-stone-50 px-4 py-3">
           <div>
             <p className="font-semibold">{bill.locked ? "🔒 Bill locked" : "🔓 Friends can edit"}</p>
@@ -86,34 +127,30 @@ export default function AdminApp({ token }: { token: string }) {
           Live check
           <span
             className={`rounded-full px-3 py-1 text-xs font-semibold ${
-              result.unclaimedSatang === 0 && balanced ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
+              covered ? "bg-accent-soft text-accent-ink" : "bg-amber-100 text-amber-800"
             }`}
           >
-            {result.unclaimedSatang === 0 && balanced ? "✓ Fully covered" : `Short ${formatTHB(expected - result.sharesTotalSatang)}`}
+            {covered ? "✓ Fully covered" : `Short ${formatTHB(result.grandTotalSatang - result.sharesTotalSatang)}`}
           </span>
         </h2>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
-          <Stat label="Receipt total" value={formatTHB(bill.receiptTotalSatang)} />
+          <Stat label="Items" value={formatTHB(result.itemsTotalSatang)} />
+          {result.serviceSatang > 0 && <Stat label={`Service ${servicePct}%`} value={formatTHB(result.serviceSatang)} />}
+          {result.vatSatang > 0 && <Stat label="VAT 7%" value={formatTHB(result.vatSatang)} />}
+          {bill.extraSatang > 0 && <Stat label={bill.extraLabel} value={formatTHB(bill.extraSatang)} />}
+          <Stat label="Bill total" value={formatTHB(result.grandTotalSatang)} />
           <Stat
-            label="Items on bill"
-            value={formatTHB(result.itemsTotalSatang)}
-            warn={!receiptMatches}
-            hint={!receiptMatches ? `${formatTHB(result.itemsTotalSatang - bill.receiptTotalSatang)} vs receipt (manual items)` : undefined}
+            label="Receipt says"
+            value={bill.receiptTotalSatang ? formatTHB(bill.receiptTotalSatang) : "—"}
+            warn={receiptDiff !== 0}
+            hint={receiptDiff !== 0 ? `${formatTHB(Math.abs(receiptDiff))} ${receiptDiff > 0 ? "over" : "under"} the receipt` : undefined}
           />
-          <Stat label={`${bill.extraLabel} / extra`} value={formatTHB(bill.extraSatang, { decimals: true })} />
-          <Stat label="Claimed items" value={formatTHB(result.claimedSatang)} />
-          <Stat label="Unclaimed" value={formatTHB(result.unclaimedSatang)} warn={result.unclaimedSatang > 0} />
+          <Stat label="Unclaimed items" value={formatTHB(result.unclaimedSatang)} warn={result.unclaimedSatang > 0} />
           <Stat label="Sum of shares (exact)" value={formatTHB(result.sharesTotalSatang, { decimals: true })} />
           <Stat label="To collect (rounded up)" value={formatTHB(result.roundedTotalSatang)} />
           <Stat label="Rounding surplus (yours)" value={formatTHB(result.surplusSatang, { decimals: true })} />
           <Stat label="Paid so far" value={`${formatTHB(paidSatang)} / ${formatTHB(result.roundedTotalSatang)}`} />
         </dl>
-        <p className="mt-3 text-xs text-stone-500">
-          Check: shares {formatTHB(result.sharesTotalSatang, { decimals: true })} + unclaimed{" "}
-          {formatTHB(result.unclaimedSatang)} = {formatTHB(result.sharesTotalSatang + result.unclaimedSatang, { decimals: true })}{" "}
-          vs. items + extra {formatTHB(expected, { decimals: true })}{" "}
-          {result.sharesTotalSatang + result.unclaimedSatang === expected ? "✓" : "✗"}
-        </p>
       </Card>
 
       {result.unclaimed.length > 0 && (
@@ -138,9 +175,7 @@ export default function AdminApp({ token }: { token: string }) {
           People · {sorted.length - waiting.length} of {sorted.length} picked
         </h2>
         {waiting.length > 0 && (
-          <p className="px-4 pb-2 text-sm text-amber-800">
-            Waiting on: {waiting.map((p) => p.name).join(", ")}
-          </p>
+          <p className="px-4 pb-2 text-sm text-amber-800">Waiting on: {waiting.map((p) => p.name).join(", ")}</p>
         )}
         {sorted.length === 0 && <p className="px-4 pb-4 text-sm text-stone-500">Nobody has saved yet.</p>}
         <ul className="divide-y divide-stone-100">
@@ -157,10 +192,7 @@ export default function AdminApp({ token }: { token: string }) {
                       </span>
                     )}
                   </p>
-                  <p className="text-xs text-stone-500 tabular-nums">
-                    exact {formatTHB(p.totalSatang, { decimals: true })}
-                    {p.extraSatang > 0 && ` (incl. ${formatTHB(p.extraSatang, { decimals: true })} ${bill.extraLabel.toLowerCase()})`}
-                  </p>
+                  <p className="text-xs text-stone-500 tabular-nums">exact {formatTHB(p.totalSatang, { decimals: true })}</p>
                 </div>
                 <span className="text-lg font-bold tabular-nums">{formatTHB(p.roundedSatang)}</span>
                 <button
@@ -168,7 +200,7 @@ export default function AdminApp({ token }: { token: string }) {
                   disabled={busy}
                   onClick={() => act({ action: "paid", personId: p.id, paid: !p.paid })}
                   className={`h-10 w-24 shrink-0 rounded-full text-sm font-semibold ${
-                    p.paid ? "bg-emerald-600 text-white" : "bg-stone-200 text-stone-700"
+                    p.paid ? "bg-accent text-white" : "bg-stone-200 text-stone-700"
                   }`}
                 >
                   {p.paid ? "✓ Paid" : "Unpaid"}
@@ -188,13 +220,16 @@ export default function AdminApp({ token }: { token: string }) {
                       <span className="tabular-nums">{formatTHB(l.shareSatang, { decimals: true })}</span>
                     </li>
                   ))}
+                  {p.serviceSatang > 0 && <ChargeLine label={`Service ${servicePct}%`} value={p.serviceSatang} />}
+                  {p.vatSatang > 0 && <ChargeLine label="VAT 7%" value={p.vatSatang} />}
+                  {p.extraSatang > 0 && <ChargeLine label={bill.extraLabel} value={p.extraSatang} />}
                 </ul>
                 <button
                   type="button"
-                  onClick={() => confirm(`Remove ${p.name} from the bill?`) && act({ action: "removePerson", personId: p.id })}
+                  onClick={() => confirm(`Remove ${p.name}'s picks from the bill?`) && act({ action: "removePerson", personId: p.id })}
                   className="mt-1 text-xs text-rose-600 underline"
                 >
-                  Remove person
+                  Clear their picks
                 </button>
               </details>
             </li>
@@ -202,47 +237,10 @@ export default function AdminApp({ token }: { token: string }) {
         </ul>
       </Card>
 
+      <ItemsCard bill={bill} token={token} aiEnabled={data.aiEnabled} busy={busy} act={act} />
+      <SettingsCard bill={bill} busy={busy} act={act} />
       <GuestList bill={bill} busy={busy} act={act} />
-      <PaymentForm bill={bill} busy={busy} onSave={(payment) => act({ action: "settings", payment })} />
-      <ExtraForm bill={bill} busy={busy} onSave={(extraBaht, extraLabel) => act({ action: "settings", extraBaht, extraLabel })} />
-
-      <Card>
-        <h2 className="mb-2 text-lg font-bold">Items</h2>
-        <ul className="divide-y divide-stone-100 text-sm">
-          {bill.items.map((it) => (
-            <li key={it.id} className="flex items-center gap-3 py-2">
-              <div className="min-w-0 flex-1">
-                <p className="font-medium">
-                  {it.name} {it.manual && <span className="text-xs text-violet-600">(manual)</span>}
-                </p>
-                <p className="text-xs text-stone-500 tabular-nums">
-                  {CAT_LABEL[it.category]} · {it.qty} × {formatTHB(it.unitPriceSatang)} = {formatTHB(it.qty * it.unitPriceSatang)}
-                </p>
-              </div>
-              <label className="flex items-center gap-2 text-xs text-stone-600">
-                Everyone
-                <Switch
-                  checked={!!it.sharedByAll}
-                  disabled={busy}
-                  label={`Share ${it.name} by everyone`}
-                  onChange={(v) => act({ action: "itemShared", itemId: it.id, sharedByAll: v })}
-                />
-              </label>
-              {it.manual && (
-                <button
-                  type="button"
-                  onClick={() => confirm(`Remove ${it.name}?`) && act({ action: "removeItem", itemId: it.id })}
-                  className="h-9 rounded-lg px-2 text-rose-600"
-                  aria-label={`Remove ${it.name}`}
-                >
-                  ✕
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-        <AddItemForm busy={busy} onAdd={(item) => act({ action: "addItem", ...item })} />
-      </Card>
+      <PaymentCard bill={bill} busy={busy} act={act} />
     </main>
   );
 }
@@ -257,152 +255,210 @@ function Stat({ label, value, warn, hint }: { label: string; value: string; warn
   );
 }
 
-const input =
-  "h-12 w-full rounded-xl border border-stone-300 px-3 text-base outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20";
-const primary =
-  "h-12 rounded-xl bg-emerald-600 px-5 font-semibold text-white active:bg-emerald-700 disabled:bg-stone-300";
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function ChargeLine({ label, value }: { label: string; value: number }) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-sm font-medium text-stone-700">{label}</span>
+    <li className="flex justify-between gap-2 text-stone-500">
+      <span>{label}</span>
+      <span className="tabular-nums">{formatTHB(value, { decimals: true })}</span>
+    </li>
+  );
+}
+
+/** Card header with an Edit / Cancel toggle. Editing state is local so polling can't clobber a form. */
+function EditableCard({
+  title,
+  editing,
+  setEditing,
+  children,
+}: {
+  title: string;
+  editing: boolean;
+  setEditing: (v: boolean) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <h2 className="mb-3 flex items-center justify-between text-lg font-bold">
+        {title}
+        <button type="button" className={secondaryCls + " !h-9"} onClick={() => setEditing(!editing)}>
+          {editing ? "Cancel" : "Edit"}
+        </button>
+      </h2>
       {children}
-    </label>
-  );
-}
-
-function PaymentForm({ bill, busy, onSave }: { bill: Bill; busy: boolean; onSave: (p: Bill["payment"]) => Promise<boolean> }) {
-  const [p, setP] = useState(bill.payment);
-  const [ok, setOk] = useState(false);
-  const set = (k: keyof Bill["payment"]) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    setOk(false);
-    setP({ ...p, [k]: e.target.value });
-  };
-  const digits = p.promptpay.replace(/[^0-9]/g, "");
-  const ppValid = !digits || [10, 13, 15].includes(digits.length);
-  return (
-    <Card>
-      <h2 className="mb-1 text-lg font-bold">Payment details</h2>
-      <p className="mb-3 text-sm text-stone-500">Shown to friends after they save. PromptPay generates a QR with their exact amount.</p>
-      <form
-        className="grid gap-3 sm:grid-cols-2"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setOk(await onSave(p));
-        }}
-      >
-        <Field label="PromptPay (phone or national ID)">
-          <input className={input} inputMode="numeric" value={p.promptpay} onChange={set("promptpay")} placeholder="0812345678" />
-          {!ppValid && <span className="text-xs text-rose-600">Use a 10-digit phone, 13-digit ID or 15-digit e-wallet.</span>}
-        </Field>
-        <Field label="Bank">
-          <input className={input} value={p.bankName} onChange={set("bankName")} placeholder="KBank" />
-        </Field>
-        <Field label="Account number">
-          <input className={input} inputMode="numeric" value={p.accountNo} onChange={set("accountNo")} placeholder="123-4-56789-0" />
-        </Field>
-        <Field label="Account name">
-          <input className={input} value={p.accountName} onChange={set("accountName")} />
-        </Field>
-        <div className="flex items-center gap-3 sm:col-span-2">
-          <button className={primary} disabled={busy || !ppValid}>Save payment details</button>
-          {ok && <span className="text-sm text-emerald-700">Saved ✓</span>}
-        </div>
-      </form>
     </Card>
   );
 }
 
-function ExtraForm({ bill, busy, onSave }: { bill: Bill; busy: boolean; onSave: (baht: string, label: string) => Promise<boolean> }) {
-  const [amount, setAmount] = useState(bill.extraSatang ? String(bill.extraSatang / 100) : "");
-  const [label, setLabel] = useState(bill.extraLabel);
-  const [ok, setOk] = useState(false);
+function ItemsCard({ bill, token, aiEnabled, busy, act }: { bill: Bill; token: string; aiEnabled: boolean; busy: boolean; act: Act }) {
+  const [draft, setDraft] = useState<DraftItem[] | null>(null);
+  const editing = draft !== null;
   return (
-    <Card>
-      <h2 className="mb-1 text-lg font-bold">Tip / extra</h2>
-      <p className="mb-3 text-sm text-stone-500">Split proportionally to what each person ordered. Set 0 to remove.</p>
-      <form
-        className="grid grid-cols-2 gap-3"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setOk(await onSave(amount || "0", label));
-        }}
-      >
-        <Field label="Label">
-          <input className={input} value={label} onChange={(e) => (setOk(false), setLabel(e.target.value))} />
-        </Field>
-        <Field label="Amount (THB)">
-          <input className={input} inputMode="decimal" value={amount} onChange={(e) => (setOk(false), setAmount(e.target.value))} placeholder="0" />
-        </Field>
-        <div className="col-span-2 flex items-center gap-3">
-          <button className={primary} disabled={busy}>Save extra</button>
-          {ok && <span className="text-sm text-emerald-700">Saved ✓</span>}
-        </div>
-      </form>
-    </Card>
-  );
-}
-
-function AddItemForm({
-  busy,
-  onAdd,
-}: {
-  busy: boolean;
-  onAdd: (item: { name: string; category: Category; qty: number; unitPriceBaht: string }) => Promise<boolean>;
-}) {
-  const [name, setName] = useState("");
-  const [category, setCategory] = useState<Category>("food");
-  const [qty, setQty] = useState("1");
-  const [price, setPrice] = useState("");
-  return (
-    <form
-      className="mt-4 grid grid-cols-2 gap-3 border-t border-stone-200 pt-4 sm:grid-cols-4"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        if (await onAdd({ name, category, qty: Number(qty), unitPriceBaht: price })) {
-          setName("");
-          setQty("1");
-          setPrice("");
-        }
-      }}
-    >
-      <p className="col-span-2 text-sm font-semibold sm:col-span-4">Add a manual item (not on the receipt)</p>
-      <div className="col-span-2">
-        <Field label="Name">
-          <input className={input} value={name} onChange={(e) => setName(e.target.value)} required />
-        </Field>
-      </div>
-      <Field label="Category">
-        <select className={input + " bg-white"} value={category} onChange={(e) => setCategory(e.target.value as Category)}>
-          {CATEGORIES.map((c) => (
-            <option key={c} value={c}>
-              {CAT_LABEL[c]}
-            </option>
+    <EditableCard title={`Receipt items (${bill.items.length})`} editing={editing} setEditing={(v) => setDraft(v ? bill.items.map(toDraft) : null)}>
+      {editing ? (
+        <>
+          <ItemsEditor items={draft} onChange={setDraft} adminToken={token} aiEnabled={aiEnabled} />
+          <p className="mt-3 text-xs text-stone-500">
+            Friends keep their ticks on items you rename or reprice. Ticks on removed items are dropped.
+          </p>
+          <button
+            type="button"
+            className={primaryCls + " mt-3 w-full"}
+            disabled={busy || toPayload(draft).length === 0}
+            onClick={async () => (await act({ action: "replaceItems", items: toPayload(draft) })) && setDraft(null)}
+          >
+            Save items
+          </button>
+        </>
+      ) : (
+        <ul className="divide-y divide-stone-100 text-sm">
+          {bill.items.map((it) => (
+            <li key={it.id} className="flex items-center gap-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="font-medium">{it.name}</p>
+                <p className="text-xs text-stone-500 tabular-nums">
+                  {CAT_LABEL[it.category]} · {it.qty} × {formatTHB(it.unitPriceSatang)} = {formatTHB(it.qty * it.unitPriceSatang)}
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-stone-600">
+                Everyone
+                <Switch
+                  checked={!!it.sharedByAll}
+                  disabled={busy}
+                  label={`Share ${it.name} by everyone`}
+                  onChange={(v) => act({ action: "itemShared", itemId: it.id, sharedByAll: v })}
+                />
+              </label>
+            </li>
           ))}
-        </select>
-      </Field>
-      <Field label="Qty">
-        <input className={input} inputMode="numeric" value={qty} onChange={(e) => setQty(e.target.value)} required />
-      </Field>
-      <Field label="Unit price (THB, incl. VAT)">
-        <input className={input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} required />
-      </Field>
-      <div className="col-span-2 flex items-end sm:col-span-3">
-        <button className={primary} disabled={busy || !name.trim() || !price}>Add item</button>
-      </div>
-    </form>
+        </ul>
+      )}
+    </EditableCard>
   );
 }
 
-function GuestList({
-  bill,
-  busy,
-  act,
-}: {
-  bill: Bill;
-  busy: boolean;
-  act: (body: Record<string, unknown>) => Promise<boolean>;
-}) {
+function SettingsCard({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(bill.title);
+  const [date, setDate] = useState(bill.date);
+  const [theme, setTheme] = useState<{ emoji: string; color: ThemeColor }>({ emoji: bill.emoji ?? "🧾", color: bill.color ?? "emerald" });
+  const [charges, setCharges] = useState<ChargesValue>({
+    serviceChargePct: String((bill.serviceBp ?? 0) / 100),
+    vatAdded: (bill.vatBp ?? 0) > 0,
+  });
+  const [receiptTotal, setReceiptTotal] = useState(bill.receiptTotalSatang ? String(bill.receiptTotalSatang / 100) : "");
+  const [extra, setExtra] = useState(bill.extraSatang ? String(bill.extraSatang / 100) : "");
+  const [extraLabel, setExtraLabel] = useState(bill.extraLabel);
+
+  const open = (v: boolean) => {
+    if (v) {
+      // Start from the latest saved values each time the form opens.
+      setTitle(bill.title);
+      setDate(bill.date);
+      setTheme({ emoji: bill.emoji ?? "🧾", color: bill.color ?? "emerald" });
+      setCharges({ serviceChargePct: String((bill.serviceBp ?? 0) / 100), vatAdded: (bill.vatBp ?? 0) > 0 });
+      setReceiptTotal(bill.receiptTotalSatang ? String(bill.receiptTotalSatang / 100) : "");
+      setExtra(bill.extraSatang ? String(bill.extraSatang / 100) : "");
+      setExtraLabel(bill.extraLabel);
+    }
+    setEditing(v);
+  };
+
+  return (
+    <EditableCard title="Party, charges & tip" editing={editing} setEditing={open}>
+      {editing ? (
+        <form
+          className="space-y-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const ok = await act({
+              action: "settings",
+              title,
+              date,
+              emoji: theme.emoji,
+              color: theme.color,
+              serviceChargePct: charges.serviceChargePct || "0",
+              vatAdded: charges.vatAdded,
+              receiptTotalBaht: receiptTotal.replace(/,/g, ""),
+              extraBaht: extra.replace(/,/g, "") || "0",
+              extraLabel,
+            });
+            if (ok) setEditing(false);
+          }}
+        >
+          <div className="grid grid-cols-[1fr_auto] gap-3">
+            <Field label="Party name">
+              <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
+            </Field>
+            <Field label="Date">
+              <input type="date" className={inputCls + " !w-40"} value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+          <ThemePicker emoji={theme.emoji} color={theme.color} onChange={setTheme} />
+          <ChargesFields value={charges} onChange={setCharges} />
+          <Field label="Total printed on the receipt (optional)">
+            <input className={inputCls} inputMode="decimal" value={receiptTotal} onChange={(e) => setReceiptTotal(e.target.value)} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Tip / extra label">
+              <input className={inputCls} value={extraLabel} onChange={(e) => setExtraLabel(e.target.value)} />
+            </Field>
+            <Field label="Amount (THB)" hint="Split by what each person ordered">
+              <input className={inputCls} inputMode="decimal" value={extra} onChange={(e) => setExtra(e.target.value)} placeholder="0" />
+            </Field>
+          </div>
+          <button className={primaryCls + " w-full"} disabled={busy || !title.trim()}>
+            Save
+          </button>
+        </form>
+      ) : (
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+          <Stat label="Party" value={`${bill.emoji ?? ""} ${bill.title}`} />
+          <Stat label="Date" value={bill.date} />
+          <Stat label="Service charge" value={bill.serviceBp ? `${(bill.serviceBp ?? 0) / 100}%` : "None"} />
+          <Stat label="VAT" value={bill.vatBp ? "7% added on top" : "Included in prices"} />
+          <Stat label={bill.extraLabel || "Tip"} value={bill.extraSatang ? formatTHB(bill.extraSatang) : "None"} />
+          <Stat label="Receipt total" value={bill.receiptTotalSatang ? formatTHB(bill.receiptTotalSatang) : "—"} />
+        </dl>
+      )}
+    </EditableCard>
+  );
+}
+
+function PaymentCard({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act }) {
+  const [draft, setDraft] = useState<PaymentInfo | null>(null);
+  const p = bill.payment;
+  return (
+    <EditableCard title="Payment details" editing={draft !== null} setEditing={(v) => setDraft(v ? bill.payment : null)}>
+      {draft ? (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (await act({ action: "settings", payment: draft })) {
+              saveProfile({ payment: draft });
+              setDraft(null);
+            }
+          }}
+        >
+          <PaymentFields value={draft} onChange={setDraft} />
+          <button className={primaryCls + " mt-3 w-full"} disabled={busy || !promptpayValid(draft)}>
+            Save payment details
+          </button>
+          <p className="mt-2 text-xs text-stone-500">Also saved on this phone for your next bill.</p>
+        </form>
+      ) : p.promptpay || p.accountNo ? (
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+          <Stat label="PromptPay" value={p.promptpay || "—"} />
+          <Stat label="Bank" value={[p.bankName, p.accountNo].filter(Boolean).join(" ") || "—"} />
+          <Stat label="Account name" value={p.accountName || "—"} />
+        </dl>
+      ) : (
+        <p className="text-sm text-amber-800">Add your PromptPay number so friends get a QR code with their amount.</p>
+      )}
+    </EditableCard>
+  );
+}
+
+function GuestList({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act }) {
   const [name, setName] = useState("");
   const roster = bill.roster ?? [];
   return (
@@ -410,7 +466,6 @@ function GuestList({
       <h2 className="mb-1 text-lg font-bold">Guest list ({roster.length})</h2>
       <p className="mb-3 text-sm text-stone-500">
         Friends tap their name instead of typing it. Items shared by everyone are split across this list.
-        {roster.length !== bill.guests && ` The receipt says ${bill.guests} guests.`}
       </p>
       <ul className="flex flex-wrap gap-2">
         {roster.map((g) => (
@@ -433,11 +488,14 @@ function GuestList({
         className="mt-3 flex gap-2"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (await act({ action: "addGuest", name })) setName("");
+          if (await act({ action: "addGuest", name })) {
+            rememberFriends([name.trim()]);
+            setName("");
+          }
         }}
       >
-        <input className={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Add a name" />
-        <button className={primary} disabled={busy || !name.trim()}>
+        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Add a name" />
+        <button className={primaryCls} disabled={busy || !name.trim()}>
           Add
         </button>
       </form>

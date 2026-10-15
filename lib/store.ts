@@ -22,6 +22,10 @@ interface Store {
   getPerson(billId: string, personId: string): Promise<Person | null>;
   putPerson(billId: string, person: Person): Promise<void>;
   deletePerson(billId: string, personId: string): Promise<void>;
+  /** Rate-limit counter: current count for `key` (0 if expired/missing). */
+  count(key: string): Promise<number>;
+  /** Increment `key`; the window starts at the first hit and lasts `ttlSec`. */
+  bump(key: string, ttlSec: number): Promise<number>;
 }
 
 const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
@@ -46,6 +50,12 @@ function redisStore(redis: Redis): Store {
     async deletePerson(billId, pid) {
       await redis.hdel(`bill:${billId}:people`, pid);
     },
+    count: async (key) => (await redis.get<number>(key)) ?? 0,
+    async bump(key, ttlSec) {
+      const n = await redis.incr(key);
+      if (n === 1) await redis.expire(key, ttlSec);
+      return n;
+    },
   };
 }
 
@@ -56,6 +66,7 @@ interface FileDB {
 }
 
 function fileStore(file: string): Store {
+  const counters = new Map<string, { n: number; until: number }>();
   // Serialize writes within this process so read-modify-write is safe.
   let queue: Promise<unknown> = Promise.resolve();
   const read = async (): Promise<FileDB> => {
@@ -93,10 +104,25 @@ function fileStore(file: string): Store {
       mutate((db) => {
         delete db.people[billId]?.[pid];
       }),
+    async count(key) {
+      const c = counters.get(key);
+      return c && c.until > Date.now() ? c.n : 0;
+    },
+    async bump(key, ttlSec) {
+      const c = counters.get(key);
+      const next = c && c.until > Date.now() ? { ...c, n: c.n + 1 } : { n: 1, until: Date.now() + ttlSec * 1000 };
+      counters.set(key, next);
+      return next.n;
+    },
   };
 }
 
-export const usingRedis = Boolean(url && token);
+// `next dev` loads .env.local, which `vercel env pull` fills with the
+// production Redis credentials. Keep local development on the file store
+// unless explicitly asked, so testing never touches real bills.
+const devWithoutRedis = process.env.NODE_ENV === "development" && process.env.USE_REDIS !== "1";
+
+export const usingRedis = Boolean(url && token) && !devWithoutRedis;
 
 /** On Vercel the filesystem is read-only, so without Redis every call fails loudly. */
 const missingRedis = new Proxy({} as Store, {

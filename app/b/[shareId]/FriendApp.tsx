@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { computeBill, expandUnits, formatTHB, withRoster, type BillResult, type UnitResult } from "@/lib/money";
+import { billCharges, computeBill, expandUnits, formatTHB, withRoster, type BillResult, type UnitResult } from "@/lib/money";
 import { newId, sendJson, storage, usePolling } from "@/lib/client";
 import { useLang, type TFn } from "@/lib/i18n";
+import { themeStyle } from "@/lib/theme";
 import { CATEGORIES, type BillPayload, type Category, type Guest, type Item, type Person } from "@/lib/types";
 import { Avatars, Card, Checkbox, CopyButton, LangToggle, PromptPayQR, Switch } from "@/components/ui";
 
@@ -53,7 +54,7 @@ export default function FriendApp({ shareId }: { shareId: string }) {
   }, [everyone, me, view, draft, saved?.paid]);
 
   const result = useMemo(
-    () => (data ? computeBill(data.bill.items, calcPeople, data.bill.extraSatang) : null),
+    () => (data ? computeBill(data.bill.items, calcPeople, billCharges(data.bill)) : null),
     [data, calcPeople],
   );
 
@@ -117,10 +118,13 @@ export default function FriendApp({ shareId }: { shareId: string }) {
   const header = (
     <header className="flex items-start justify-between gap-3 px-4 pt-5 pb-3">
       <div className="min-w-0">
-        <p className="text-sm font-medium text-emerald-700">{t("appName")}</p>
-        <h1 className="truncate text-2xl font-bold text-stone-900">{bill.title}</h1>
+        <p className="text-sm font-medium text-accent-ink">{t("appName")}</p>
+        <h1 className="truncate text-2xl font-bold text-stone-900">
+          {bill.emoji && <span className="mr-1.5">{bill.emoji}</span>}
+          {bill.title}
+        </h1>
         <p className="text-sm text-stone-500">
-          {formatDate(bill.date)} · {bill.guests} {t("guests")} · {formatTHB(bill.receiptTotalSatang)} {t("inclVat")}
+          {formatDate(bill.date)} · {roster.length || bill.guests} {t("guests")} · {formatTHB(result.grandTotalSatang)}
         </p>
       </div>
       <LangToggle />
@@ -129,7 +133,7 @@ export default function FriendApp({ shareId }: { shareId: string }) {
 
   if (view === "name" || !me) {
     return (
-      <main className="mx-auto w-full max-w-lg">
+      <main className="mx-auto w-full max-w-lg" style={themeStyle(bill.color)}>
         {header}
         <NameForm
           roster={roster}
@@ -147,7 +151,7 @@ export default function FriendApp({ shareId }: { shareId: string }) {
   const showSummary = view === "summary" && saved && mine;
 
   return (
-    <main className="mx-auto w-full max-w-lg pb-40">
+    <main className="mx-auto w-full max-w-lg pb-40" style={themeStyle(bill.color)}>
       {header}
       <div className="flex items-center justify-between px-4 pb-3">
         <button
@@ -191,6 +195,7 @@ export default function FriendApp({ shareId }: { shareId: string }) {
           draft={draft}
           setDraft={setDraft}
           locked={bill.locked}
+          priceNote={priceNote(bill, t)}
           onShared={setShared}
           t={t}
         />
@@ -216,7 +221,7 @@ export default function FriendApp({ shareId }: { shareId: string }) {
               type="button"
               disabled={saving || bill.locked || draft.size === 0 || !dirty}
               onClick={save}
-              className="h-14 min-w-32 rounded-2xl bg-emerald-600 px-6 text-lg font-semibold text-white shadow-sm active:bg-emerald-700 disabled:bg-stone-300"
+              className="h-14 min-w-32 rounded-2xl bg-accent px-6 text-lg font-semibold text-white shadow-sm active:bg-accent-strong disabled:bg-stone-300"
             >
               {saving ? t("saving") : !dirty ? t("saved") : saved ? t("update") : t("save")}
             </button>
@@ -228,6 +233,15 @@ export default function FriendApp({ shareId }: { shareId: string }) {
       )}
     </main>
   );
+}
+
+/** Tells friends whether the prices they see are final or get charges added. */
+function priceNote(bill: BillPayload["bill"], t: TFn) {
+  const parts = [
+    bill.serviceBp ? t("serviceShort", { pct: bill.serviceBp / 100 }) : "",
+    bill.vatBp ? t("vatShort") : "",
+  ].filter(Boolean);
+  return parts.length ? t("chargesNote", { charges: parts.join(" + ") }) : t("vatNote");
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -275,14 +289,14 @@ function NameForm({
                   type="button"
                   onClick={() => onChoose(g)}
                   className={`flex min-h-14 items-center gap-2.5 rounded-2xl border-2 px-3 text-left active:bg-stone-100 ${
-                    isMe ? "border-emerald-600 bg-emerald-50" : "border-stone-200 bg-white"
+                    isMe ? "border-accent bg-accent-soft" : "border-stone-200 bg-white"
                   }`}
                 >
                   <Avatars people={[g]} size="md" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-lg font-semibold">{g.name}</span>
                     {savedIds.has(g.id) && (
-                      <span className="block text-xs text-emerald-700">✓ {t("picked")}</span>
+                      <span className="block text-xs text-accent-ink">✓ {t("picked")}</span>
                     )}
                   </span>
                 </button>
@@ -311,13 +325,13 @@ function NameForm({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t("namePlaceholder")}
-              className="mt-3 h-14 w-full rounded-xl border border-stone-300 px-4 text-lg outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20"
+              className="mt-3 h-14 w-full rounded-xl border border-stone-300 px-4 text-lg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
             />
             <p className="mt-2 text-sm text-stone-500">{t("nameHint")}</p>
             <button
               type="submit"
               disabled={!trimmed}
-              className="mt-4 h-14 w-full rounded-2xl bg-emerald-600 text-lg font-semibold text-white active:bg-emerald-700 disabled:bg-stone-300"
+              className="mt-4 h-14 w-full rounded-2xl bg-accent text-lg font-semibold text-white active:bg-accent-strong disabled:bg-stone-300"
             >
               {t("continue")}
             </button>
@@ -344,6 +358,7 @@ function Picker({
   draft,
   setDraft,
   locked,
+  priceNote,
   onShared,
   t,
 }: {
@@ -354,6 +369,7 @@ function Picker({
   draft: Set<string>;
   setDraft: (s: Set<string>) => void;
   locked: boolean;
+  priceNote: string;
   onShared: (item: Item, v: boolean) => void;
   t: TFn;
 }) {
@@ -409,7 +425,7 @@ function Picker({
         </div>
       )}
 
-      <p className="px-1 text-xs text-stone-500">{t("vatNote")}</p>
+      <p className="px-1 text-xs text-stone-500">{priceNote}</p>
 
       {CATEGORIES.map((cat) => {
         const catItems = items.filter((i) => i.category === cat);
@@ -423,7 +439,7 @@ function Picker({
               <span>{CATEGORY_ICON[cat]}</span>
               {t(cat)}
               {pickedCount > 0 && (
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">
+                <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-semibold text-accent-ink">
                   {pickedCount}
                 </span>
               )}
@@ -496,7 +512,7 @@ function Picker({
                               onClick={() => toggle(u.id)}
                               aria-pressed={on}
                               className={`flex min-h-16 flex-col items-center justify-center gap-1 rounded-xl border-2 text-sm font-semibold transition-colors ${
-                                on ? "border-emerald-600 bg-emerald-50 text-emerald-900" : "border-stone-200 bg-white text-stone-700"
+                                on ? "border-accent bg-accent-soft text-accent-ink" : "border-stone-200 bg-white text-stone-700"
                               }`}
                             >
                               #{u.index}
@@ -597,14 +613,14 @@ function UnitRow({
       className={`flex min-h-14 w-full items-center gap-3 text-left transition-colors ${
         bare
           ? "px-1 py-2"
-          : `rounded-2xl px-3 py-3 shadow-sm ring-1 ${checked ? "bg-emerald-50 ring-emerald-300" : "bg-white ring-stone-200/70"}`
+          : `rounded-2xl px-3 py-3 shadow-sm ring-1 ${checked ? "bg-accent-soft ring-accent-ring" : "bg-white ring-stone-200/70"}`
       }`}
     >
       <Checkbox checked={checked} />
       <span className="min-w-0 flex-1">
         <span className="block font-medium text-stone-900">{title}</span>
         {checked && share && share.sharedWith > 1 && (
-          <span className="block text-xs text-emerald-700 tabular-nums">
+          <span className="block text-xs text-accent-ink tabular-nums">
             {t("yourShare")} {formatTHB(share.shareSatang, { decimals: true })} ({t("splitN", { n: share.sharedWith })})
           </span>
         )}
@@ -654,17 +670,24 @@ function Summary({
           ))}
         </ul>
         <dl className="mt-2 space-y-1 border-t border-stone-200 pt-2 text-sm">
+          {mine.totalSatang !== mine.subtotalSatang && (
+            <Row label={t("subtotal")} value={formatTHB(mine.subtotalSatang, { decimals: true })} />
+          )}
+          {mine.serviceSatang > 0 && (
+            <Row
+              label={t("serviceCharge", { pct: (bill.serviceBp ?? 0) / 100 })}
+              value={formatTHB(mine.serviceSatang, { decimals: true })}
+            />
+          )}
+          {mine.vatSatang > 0 && <Row label={t("vat")} value={formatTHB(mine.vatSatang, { decimals: true })} />}
           {mine.extraSatang > 0 && (
-            <>
-              <Row label={t("subtotal")} value={formatTHB(mine.subtotalSatang, { decimals: true })} />
-              <Row label={bill.extraLabel} value={formatTHB(mine.extraSatang, { decimals: true })} />
-            </>
+            <Row label={bill.extraLabel} value={formatTHB(mine.extraSatang, { decimals: true })} />
           )}
           <Row label={t("total")} value={formatTHB(mine.totalSatang, { decimals: true })} />
         </dl>
-        <div className="mt-3 flex items-end justify-between rounded-xl bg-emerald-50 px-4 py-3">
-          <span className="font-semibold text-emerald-900">{t("youPay")}</span>
-          <span className="text-3xl font-bold text-emerald-900 tabular-nums">{formatTHB(mine.roundedSatang)}</span>
+        <div className="mt-3 flex items-end justify-between rounded-xl bg-accent-soft px-4 py-3">
+          <span className="font-semibold text-accent-ink">{t("youPay")}</span>
+          <span className="text-3xl font-bold text-accent-ink tabular-nums">{formatTHB(mine.roundedSatang)}</span>
         </div>
         <p className="mt-2 text-xs text-stone-500">{t("roundNote")}</p>
         {!locked && (
@@ -682,10 +705,10 @@ function Summary({
         <h2 className="mb-3 flex items-center justify-between text-lg font-bold">
           {t("payment")}
           {mine.paid && (
-            <span className="rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white">✓ {t("paid")}</span>
+            <span className="rounded-full bg-accent px-3 py-1 text-xs font-semibold text-white">✓ {t("paid")}</span>
           )}
         </h2>
-        {mine.paid && <p className="mb-3 text-sm text-emerald-800">{t("markedPaid")}</p>}
+        {mine.paid && <p className="mb-3 text-sm text-accent-ink">{t("markedPaid")}</p>}
         {!payment.promptpay && !hasBank && <p className="text-sm text-stone-500">{t("noPayment")}</p>}
         {payment.promptpay && mine.roundedSatang > 0 && (
           <>

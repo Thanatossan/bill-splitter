@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   allocateProportional,
+  chargesOn,
   computeBill,
   expandUnits,
   itemsTotal,
@@ -121,7 +122,7 @@ describe("computeBill", () => {
         person("b", ["wine#1"]),
         person("c", []),
       ],
-      10001,
+      { extraSatang: 10001 },
     );
     expect(res.unclaimedSatang).toBe(0);
     expect(res.sharesTotalSatang).toBe(res.itemsTotalSatang + 10001);
@@ -156,7 +157,7 @@ describe("computeBill", () => {
   });
 
   it("handles no people", () => {
-    const res = computeBill(items, [], 5000);
+    const res = computeBill(items, [], { extraSatang: 5000 });
     expect(res.unclaimedSatang).toBe(res.itemsTotalSatang);
     expect(res.sharesTotalSatang).toBe(0);
   });
@@ -199,5 +200,43 @@ describe("guest list", () => {
       expect(p.roundedSatang).toBe(78900);
     }
     expect(res.surplusSatang).toBe(12 * 75);
+  });
+});
+
+describe("service charge and VAT", () => {
+  const items: Item[] = [
+    { id: "steak", name: "Steak", category: "food", qty: 1, unitPriceSatang: 100000 },
+    { id: "salad", name: "Salad", category: "food", qty: 1, unitPriceSatang: 33300 },
+  ];
+
+  it("applies service first, then VAT on top (Thai style)", () => {
+    expect(chargesOn(100000, 1000, 700)).toEqual({ service: 10000, vat: 7700 });
+  });
+
+  it("splits charges by what each person ordered and sums exactly", () => {
+    const res = computeBill(items, [person("a", ["steak#1"]), person("b", ["salad#1"])], {
+      serviceBp: 1000,
+      vatBp: 700,
+    });
+    const { service, vat } = chargesOn(133300, 1000, 700);
+    expect(res.serviceSatang).toBe(service);
+    expect(res.vatSatang).toBe(vat);
+    expect(res.byId.a.serviceSatang).toBe(10000);
+    expect(res.byId.a.vatSatang).toBe(7700);
+    expect(res.byId.a.totalSatang).toBe(117700);
+    expect(res.sharesTotalSatang).toBe(res.grandTotalSatang);
+    expect(res.grandTotalSatang).toBe(133300 + service + vat);
+  });
+
+  it("doesn't charge anyone service on unclaimed items", () => {
+    const res = computeBill(items, [person("a", ["salad#1"])], { serviceBp: 1000 });
+    expect(res.byId.a.serviceSatang).toBe(3330);
+    expect(res.serviceSatang).toBe(13330);
+    expect(res.grandTotalSatang - res.sharesTotalSatang).toBe(100000 + 10000);
+  });
+
+  it("matches the old behavior when prices include VAT and there is no service", () => {
+    const res = computeBill(SEED_ITEMS, SEED_ROSTER.map((g) => person(g.id, [])), { serviceBp: 0, vatBp: 0 });
+    expect(res.grandTotalSatang).toBe(945900);
   });
 });

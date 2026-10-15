@@ -130,6 +130,8 @@ export interface PersonResult {
   paid: boolean;
   lines: Line[];
   subtotalSatang: number;
+  serviceSatang: number;
+  vatSatang: number;
   extraSatang: number;
   totalSatang: number;
   /** What we actually ask the person to pay. */
@@ -140,6 +142,25 @@ export interface UnitResult extends Unit {
   claimants: string[];
 }
 
+export interface Charges {
+  /** Tip / extra, split proportionally to subtotals. */
+  extraSatang?: number;
+  /** Service charge in basis points (1000 = 10%). */
+  serviceBp?: number;
+  /** VAT added on top in basis points (700 = 7%); 0 when prices include VAT. */
+  vatBp?: number;
+}
+
+/**
+ * Thai-style charges on an amount: service charge first, then VAT on
+ * (amount + service). Each is rounded to the satang once, at bill level.
+ */
+export function chargesOn(amountSatang: number, serviceBp = 0, vatBp = 0) {
+  const service = Math.round((amountSatang * serviceBp) / 10000);
+  const vat = Math.round(((amountSatang + service) * vatBp) / 10000);
+  return { service, vat };
+}
+
 export interface BillResult {
   units: UnitResult[];
   people: PersonResult[];
@@ -148,8 +169,13 @@ export interface BillResult {
   claimedSatang: number;
   unclaimed: UnitResult[];
   unclaimedSatang: number;
+  /** Service / VAT on the whole bill (what the restaurant charges). */
+  serviceSatang: number;
+  vatSatang: number;
   extraSatang: number;
-  /** Sum of exact person totals (claimed items + extra). */
+  /** Items + service + VAT + extra: what the group owes in total. */
+  grandTotalSatang: number;
+  /** Sum of exact person totals. Equals grandTotal once nothing is unclaimed. */
   sharesTotalSatang: number;
   /** Sum of rounded-up person totals. */
   roundedTotalSatang: number;
@@ -160,11 +186,8 @@ export interface BillResult {
  * Compute every person's share. Deterministic: people are ordered by id so
  * every client and the server agree on who absorbs leftover satang.
  */
-export function computeBill(
-  items: Item[],
-  peopleIn: Person[],
-  extraSatang = 0,
-): BillResult {
+export function computeBill(items: Item[], peopleIn: Person[], charges: Charges = {}): BillResult {
+  const { extraSatang = 0, serviceBp = 0, vatBp = 0 } = charges;
   const people = [...peopleIn].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const everyone = people.map((p) => p.id);
   const claimSets = new Map(people.map((p) => [p.id, new Set(p.unitIds)]));
@@ -175,6 +198,8 @@ export function computeBill(
     paid: p.paid,
     lines: [],
     subtotalSatang: 0,
+    serviceSatang: 0,
+    vatSatang: 0,
     extraSatang: 0,
     totalSatang: 0,
     roundedSatang: 0,
@@ -205,19 +230,25 @@ export function computeBill(
     return { ...u, claimants };
   });
 
-  const extras = allocateProportional(
-    extraSatang,
-    results.map((r) => r.subtotalSatang),
-  );
+  // Charges on what has been claimed so far, split by what each person had.
+  // Unclaimed items don't inflate anyone's service charge or VAT.
+  const subtotals = results.map((r) => r.subtotalSatang);
+  const claimedCharges = chargesOn(subtotals.reduce((a, b) => a + b, 0), serviceBp, vatBp);
+  const services = allocateProportional(claimedCharges.service, subtotals);
+  const vats = allocateProportional(claimedCharges.vat, subtotals);
+  const extras = allocateProportional(extraSatang, subtotals);
   results.forEach((r, i) => {
+    r.serviceSatang = services[i] ?? 0;
+    r.vatSatang = vats[i] ?? 0;
     r.extraSatang = extras[i] ?? 0;
-    r.totalSatang = r.subtotalSatang + r.extraSatang;
+    r.totalSatang = r.subtotalSatang + r.serviceSatang + r.vatSatang + r.extraSatang;
     r.roundedSatang = roundUpToBaht(r.totalSatang);
   });
 
   const unclaimed = units.filter((u) => u.claimants.length === 0);
   const unclaimedSatang = unclaimed.reduce((s, u) => s + u.priceSatang, 0);
   const total = itemsTotal(items);
+  const billCharges = chargesOn(total, serviceBp, vatBp);
   const sharesTotalSatang = results.reduce((s, r) => s + r.totalSatang, 0);
   const roundedTotalSatang = results.reduce((s, r) => s + r.roundedSatang, 0);
 
@@ -229,9 +260,19 @@ export function computeBill(
     claimedSatang: total - unclaimedSatang,
     unclaimed,
     unclaimedSatang,
-    extraSatang: results.length ? extraSatang : 0,
+    serviceSatang: billCharges.service,
+    vatSatang: billCharges.vat,
+    extraSatang,
+    grandTotalSatang: total + billCharges.service + billCharges.vat + extraSatang,
     sharesTotalSatang,
     roundedTotalSatang,
     surplusSatang: roundedTotalSatang - sharesTotalSatang,
   };
 }
+
+/** The charge settings stored on a bill, in the shape computeBill takes. */
+export const billCharges = (bill: {
+  extraSatang: number;
+  serviceBp?: number;
+  vatBp?: number;
+}): Charges => ({ extraSatang: bill.extraSatang, serviceBp: bill.serviceBp ?? 0, vatBp: bill.vatBp ?? 0 });

@@ -117,7 +117,7 @@ export function Checkbox({ checked }: { checked: boolean }) {
     <span
       aria-hidden
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 transition-colors ${
-        checked ? "border-emerald-600 bg-emerald-600" : "border-stone-300 bg-white"
+        checked ? "border-accent bg-accent" : "border-stone-300 bg-white"
       }`}
     >
       {checked && (
@@ -149,7 +149,7 @@ export function Switch({
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`relative h-7 w-12 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
-        checked ? "bg-emerald-600" : "bg-stone-300"
+        checked ? "bg-accent" : "bg-stone-300"
       }`}
     >
       <span

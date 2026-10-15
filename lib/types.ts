@@ -29,6 +29,9 @@ export interface Guest {
   name: string;
 }
 
+export const THEME_COLORS = ["emerald", "teal", "sky", "indigo", "violet", "pink", "rose", "orange"] as const;
+export type ThemeColor = (typeof THEME_COLORS)[number];
+
 export interface Bill {
   id: string;
   adminToken: string;
@@ -37,8 +40,14 @@ export interface Bill {
   guests: number;
   /** Guest list friends pick their name from. Optional for older bills. */
   roster?: Guest[];
-  /** Printed receipt total in satang (for the sanity check). */
+  /** Printed receipt total in satang (for the sanity check; 0 = unknown). */
   receiptTotalSatang: number;
+  emoji?: string;
+  color?: ThemeColor;
+  /** Service charge in basis points (1000 = 10%), on top of item prices. */
+  serviceBp?: number;
+  /** VAT added on top in basis points (700 = 7%); 0 when prices include VAT. */
+  vatBp?: number;
   items: Item[];
   /** Tip / service / extra, split proportionally to each person's subtotal. */
   extraSatang: number;

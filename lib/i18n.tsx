@@ -6,7 +6,6 @@ import { storage } from "./client";
 const en = {
   appName: "Split the bill",
   guests: "guests",
-  inclVat: "incl. VAT",
   yourName: "What's your name?",
   whoAreYou: "Who are you?",
   pickName: "Tap your name. We'll remember you on this phone.",
@@ -63,6 +62,11 @@ const en = {
   loading: "Loading…",
   saveFailed: "Couldn't save. Check your connection and try again.",
   vatNote: "Prices already include 7% VAT",
+  chargesNote: "Prices below don't include {charges}. It's added to your total based on what you ordered.",
+  serviceShort: "{pct}% service charge",
+  vatShort: "7% VAT",
+  serviceCharge: "Service charge {pct}%",
+  vat: "VAT 7%",
 };
 
 type Dict = typeof en;
@@ -70,7 +74,6 @@ type Dict = typeof en;
 const th: Dict = {
   appName: "หารค่าอาหาร",
   guests: "คน",
-  inclVat: "รวม VAT",
   yourName: "คุณชื่ออะไร?",
   whoAreYou: "คุณคือใคร?",
   pickName: "แตะชื่อของคุณ ระบบจะจำไว้ในมือถือเครื่องนี้",
@@ -127,6 +130,11 @@ const th: Dict = {
   loading: "กำลังโหลด…",
   saveFailed: "บันทึกไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่",
   vatNote: "ราคารวม VAT 7% แล้ว",
+  chargesNote: "ราคาด้านล่างยังไม่รวม{charges} ระบบจะคิดเพิ่มตามที่คุณสั่ง",
+  serviceShort: "ค่าบริการ {pct}%",
+  vatShort: "VAT 7%",
+  serviceCharge: "ค่าบริการ {pct}%",
+  vat: "VAT 7%",
 };
 
 export type Lang = "en" | "th";
