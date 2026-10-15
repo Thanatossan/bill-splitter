@@ -1,6 +1,7 @@
 import { guestId } from "./seed-data";
 import { cleanText, parseBahtToSatang, randomId } from "./server";
-import { CATEGORIES, THEME_COLORS, type Bill, type Category, type Guest, type Item, type ThemeColor } from "./types";
+import { normalizeThaiPhone } from "./phone";
+import { CATEGORIES, THEME_COLORS, type Bill, type Category, type Contact, type Guest, type Item, type ThemeColor } from "./types";
 
 export interface ItemInput {
   id?: string;
@@ -117,4 +118,12 @@ export function applySettings(bill: Bill, s: SettingsInput): string | null {
     };
   }
   return null;
+}
+
+/** Validate a friend's phone. Empty means "remove it" (null). */
+export function parseContact(raw: { phone?: unknown }): Contact | null | string {
+  const text = cleanText(raw.phone, 30);
+  if (!text) return null;
+  const phone = normalizeThaiPhone(text);
+  return phone ? { phone } : "Phone must be a Thai mobile number, like 081-234-5678";
 }

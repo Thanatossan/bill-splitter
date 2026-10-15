@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { billCharges, computeBill, expandUnits, formatTHB, withRoster, type BillResult, type UnitResult } from "@/lib/money";
 import { newId, sendJson, storage, usePolling } from "@/lib/client";
 import { useLang, type TFn } from "@/lib/i18n";
 import { themeStyle } from "@/lib/theme";
+import { displayThaiPhone, normalizeThaiPhone } from "@/lib/phone";
 import { CATEGORIES, type BillPayload, type Category, type Guest, type Item, type Person } from "@/lib/types";
 import { Avatars, Card, Checkbox, CopyButton, LangToggle, PromptPayQR, Switch } from "@/components/ui";
 
@@ -31,6 +32,16 @@ export default function FriendApp({ shareId }: { shareId: string }) {
     try {
       stored = JSON.parse(storage.get(meKey) ?? "null");
     } catch {}
+    if (!stored?.id || !stored.name) {
+      // A personal link from the host (…?me=guest-03) picks the name for them,
+      // but never overrides a choice already made on this phone.
+      const linked = new URLSearchParams(window.location.search).get("me");
+      const guest = data.bill.roster?.find((g) => g.id === linked);
+      if (guest) {
+        stored = { id: guest.id, name: guest.name };
+        storage.set(meKey, JSON.stringify(stored));
+      }
+    }
     if (!stored?.id || !stored.name) setView("name");
     else {
       const savedPerson = data.people.find((p) => p.id === stored.id);
@@ -57,6 +68,18 @@ export default function FriendApp({ shareId }: { shareId: string }) {
     () => (data ? computeBill(data.bill.items, calcPeople, billCharges(data.bill)) : null),
     [data, calcPeople],
   );
+
+  // Once the bill is final, the tab says what to pay ("✅ Pay ฿1,240").
+  const finalAmount = data?.bill.locked && me && result?.byId[me.id] && !result.byId[me.id].paid ? result.byId[me.id].roundedSatang : 0;
+  const payTitle = finalAmount > 0 ? `✅ ${t("payTitle", { amount: formatTHB(finalAmount) })}` : null;
+  useEffect(() => {
+    if (!payTitle) return;
+    const before = document.title;
+    document.title = payTitle;
+    return () => {
+      document.title = before;
+    };
+  }, [payTitle]);
 
   if (status === "notfound") return <Centered>{t("notFound")}</Centered>;
   if (!data || !result || !view) return <Centered>{t("loading")}</Centered>;
@@ -171,21 +194,28 @@ export default function FriendApp({ shareId }: { shareId: string }) {
         </span>
       </div>
 
-      {bill.locked && (
-        <div className="mx-4 mb-3 rounded-xl bg-amber-100 px-4 py-3 text-sm font-medium text-amber-900">
-          🔒 {t("locked")}
-        </div>
+      {bill.locked && mine ? (
+        <FinalBanner mine={mine} promptpay={bill.payment.promptpay} t={t} />
+      ) : (
+        bill.locked && (
+          <div className="mx-4 mb-3 rounded-xl bg-amber-100 px-4 py-3 text-sm font-medium text-amber-900">
+            🔒 {t("locked")}
+          </div>
+        )
       )}
 
       {showSummary ? (
-        <Summary
-          result={result}
-          personId={me.id}
-          bill={data.bill}
-          locked={bill.locked}
-          onEdit={() => setView("pick")}
-          t={t}
-        />
+        <>
+          {!bill.locked && <PhoneCard key={me.id} shareId={shareId} personId={me.id} t={t} />}
+          <Summary
+            result={result}
+            personId={me.id}
+            bill={data.bill}
+            locked={bill.locked}
+            onEdit={() => setView("pick")}
+            t={t}
+          />
+        </>
       ) : (
         <Picker
           items={bill.items}
@@ -232,6 +262,110 @@ export default function FriendApp({ shareId }: { shareId: string }) {
         </div>
       )}
     </main>
+  );
+}
+
+/** This friend's number for this bill, and the last one they used on any bill (to pre-fill). */
+const phoneKey = (shareId: string) => `splitbill:${shareId}:phone`;
+const LAST_PHONE = "splitbill:myPhone";
+
+/**
+ * Lets a friend leave their mobile number so the host can text them when the
+ * bill is final. The server never sends it back on this page, so what they
+ * entered is remembered on their own phone.
+ */
+function PhoneCard({ shareId, personId, t }: { shareId: string; personId: string; t: TFn }) {
+  const [saved, setSaved] = useState(() => storage.get(phoneKey(shareId)) || "");
+  const [editing, setEditing] = useState(!saved);
+  const [phone, setPhone] = useState(() => {
+    const prefill = saved || storage.get(LAST_PHONE) || "";
+    return prefill ? displayThaiPhone(prefill) : "";
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  if (!editing && saved) {
+    return (
+      <div className="mx-4 mb-4 flex items-center gap-3 rounded-xl bg-white px-4 py-3 text-sm shadow-sm ring-1 ring-stone-200">
+        <p className="min-w-0 flex-1 text-stone-700">✓ {t("notifySaved", { phone: displayThaiPhone(saved) })}</p>
+        <button type="button" className="shrink-0 font-medium text-accent-ink underline" onClick={() => setEditing(true)}>
+          {t("edit")}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="mx-4 mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-stone-200"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const normalized = phone.trim() ? normalizeThaiPhone(phone) : "";
+        if (normalized === null) return setErr(t("phoneInvalid"));
+        setBusy(true);
+        setErr("");
+        try {
+          await sendJson(`/api/b/${shareId}/people/${personId}/contact`, "PUT", { phone: normalized });
+          storage.set(phoneKey(shareId), normalized);
+          if (normalized) storage.set(LAST_PHONE, normalized);
+          setSaved(normalized);
+          setEditing(!normalized);
+        } catch {
+          setErr(t("saveFailed"));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <h2 className="text-lg font-bold">🔔 {t("notifyTitle")}</h2>
+      <p className="mb-3 text-sm text-stone-500">{t("notifyHint")}</p>
+      <div className="flex gap-2">
+        <input
+          className="h-12 w-full min-w-0 flex-1 rounded-xl border border-stone-300 bg-white px-3 text-base outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+          type="tel"
+          inputMode="tel"
+          autoComplete="tel"
+          aria-label={t("phoneLabel")}
+          placeholder="081-234-5678"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+        />
+        <button
+          className="h-12 shrink-0 rounded-xl bg-accent px-5 font-semibold text-white active:bg-accent-strong disabled:bg-stone-300"
+          disabled={busy || (!phone.trim() && !saved)}
+        >
+          {busy ? t("saving") : phone.trim() || !saved ? t("notifyMe") : t("removePhone")}
+        </button>
+      </div>
+      {err && <p className="mt-2 text-sm text-rose-600">{err}</p>}
+      {saved && (
+        <button type="button" className="mt-2 text-sm text-stone-500 underline" onClick={() => setEditing(false)}>
+          {t("cancel")}
+        </button>
+      )}
+    </form>
+  );
+}
+
+/** Top-of-page "the bill is final" card with the friend's amount and QR. */
+function FinalBanner({ mine, promptpay, t }: { mine: BillResult["people"][number]; promptpay: string; t: TFn }) {
+  return (
+    <div className="mx-4 mb-4 rounded-2xl bg-accent px-4 py-4 text-white shadow-sm">
+      <p className="text-sm font-medium opacity-90">🔒 {t("finalNote")}</p>
+      {mine.paid ? (
+        <p className="mt-1 text-2xl font-bold">✓ {t("finalPaid")}</p>
+      ) : (
+        <>
+          <p className="mt-1 text-2xl font-bold tabular-nums">{t("finalOwe", { amount: formatTHB(mine.roundedSatang) })}</p>
+          {promptpay && mine.roundedSatang > 0 && (
+            <div className="mt-3 rounded-xl bg-white p-3 text-stone-900">
+              <PromptPayQR target={promptpay} amountSatang={mine.roundedSatang} />
+              <p className="mt-2 text-center text-xs text-stone-500">{t("scanToPay")}</p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -710,7 +844,7 @@ function Summary({
         </h2>
         {mine.paid && <p className="mb-3 text-sm text-accent-ink">{t("markedPaid")}</p>}
         {!payment.promptpay && !hasBank && <p className="text-sm text-stone-500">{t("noPayment")}</p>}
-        {payment.promptpay && mine.roundedSatang > 0 && (
+        {payment.promptpay && mine.roundedSatang > 0 && !locked && (
           <>
             <PromptPayQR target={payment.promptpay} amountSatang={mine.roundedSatang} />
             <p className="mt-2 text-center text-xs text-stone-500">{t("scanToPay")}</p>

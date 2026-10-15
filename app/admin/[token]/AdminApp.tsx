@@ -5,11 +5,13 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { billCharges, computeBill, formatTHB, withRoster } from "@/lib/money";
 import { sendJson, usePolling } from "@/lib/client";
 import { rememberBill, rememberFriends, saveProfile } from "@/lib/host-storage";
+import { SMS_SEGMENT_COST_SATANG, friendUrl, notifyText, pickRecipients, smsSegments } from "@/lib/notify";
 import { toDraft, toPayload, type DraftItem } from "@/lib/receipt";
 import { themeStyle } from "@/lib/theme";
-import type { Bill, Category, PaymentInfo, Person, ThemeColor } from "@/lib/types";
+import type { Bill, Category, Contact, NotifyLog, PaymentInfo, Person, ThemeColor } from "@/lib/types";
 import { Avatars, Card, CopyButton, Switch } from "@/components/ui";
 import ItemsEditor from "@/components/host/ItemsEditor";
+import { NotifyButtons, SmsStatus, TextEveryone } from "@/components/host/notify";
 import {
   ChargesFields,
   Field,
@@ -22,8 +24,19 @@ import {
   type ChargesValue,
 } from "@/components/host/form";
 
-type AdminPayload = { bill: Bill; people: Person[]; aiEnabled: boolean };
-type Act = (body: Record<string, unknown>) => Promise<boolean>;
+type AdminPayload = {
+  bill: Bill;
+  people: Person[];
+  aiEnabled: boolean;
+  contacts: Record<string, Contact>;
+  notified: Record<string, NotifyLog>;
+  smsEnabled: boolean;
+  /** Base URL used in automatic SMS, or null when they're sent without a link. */
+  smsLinkBase: string | null;
+  smsHostName?: string;
+};
+/** Runs an admin action; resolves to the new payload, or null on failure. */
+type Act = (body: Record<string, unknown>) => Promise<AdminPayload | null>;
 
 const CAT_LABEL: Record<Category, string> = { food: "Food", drinks: "Drinks", alcohol: "Wine/Alcohol", water: "Water" };
 const noSubscribe = () => () => {};
@@ -33,6 +46,7 @@ export default function AdminApp({ token }: { token: string }) {
   const { data, setData, status } = usePolling<AdminPayload>(api, 5000);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const origin = useSyncExternalStore(noSubscribe, () => window.location.origin, () => "");
   const justCreated = useSyncExternalStore(noSubscribe, () => window.location.search.includes("new=1"), () => false);
 
@@ -50,7 +64,7 @@ export default function AdminApp({ token }: { token: string }) {
   if (status === "notfound") return <p className="p-8 text-center text-stone-500">Admin link not found.</p>;
   if (!data || !result || !bill) return <p className="p-8 text-center text-stone-500">Loading…</p>;
 
-  const { people } = data;
+  const { people, contacts, notified } = data;
   const shareUrl = `${origin}/b/${bill.id}`;
   const shareText = `${bill.emoji ?? "🧾"} ${bill.title}: tick what you had and see what you owe 👉 ${shareUrl}`;
 
@@ -58,11 +72,12 @@ export default function AdminApp({ token }: { token: string }) {
     setBusy(true);
     setErr("");
     try {
-      setData(await sendJson<AdminPayload>(api, "POST", body));
-      return true;
+      const next = await sendJson<AdminPayload>(api, "POST", body);
+      setData(next);
+      return next;
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed");
-      return false;
+      return null;
     } finally {
       setBusy(false);
     }
@@ -76,6 +91,24 @@ export default function AdminApp({ token }: { token: string }) {
   const pickedIds = new Set(people.filter((p) => p.unitIds.length > 0).map((p) => p.id));
   const waiting = sorted.filter((p) => !pickedIds.has(p.id));
   const servicePct = (bill.serviceBp ?? 0) / 100;
+
+  // The same message the automatic SMS sends, with each friend's own link.
+  const messageFor = (p: { id: string; name: string; roundedSatang: number }, base: string | null = origin) =>
+    notifyText({
+      title: bill.title,
+      name: p.name,
+      amountSatang: p.roundedSatang,
+      url: base && friendUrl(base, bill.id, p.id),
+      host: data.smsHostName,
+    });
+  const owed = Object.fromEntries(result.people.map((p) => [p.id, p.paid ? 0 : p.roundedSatang]));
+  const smsQueue = data.smsEnabled ? pickRecipients(result.people, contacts, notified, { owed }) : [];
+  const smsSegmentCounts = smsQueue.map((r) => smsSegments(messageFor(result.byId[r.id], data.smsLinkBase)).segments);
+  const withContact = sorted.filter((p) => contacts[p.id]).length;
+  const flash = (msg: string) => {
+    setNotice(msg);
+    setTimeout(() => setNotice(""), 3000);
+  };
 
   return (
     <main className="mx-auto w-full max-w-3xl space-y-4 px-4 pt-5 pb-16" style={themeStyle(bill.color)}>
@@ -120,6 +153,25 @@ export default function AdminApp({ token }: { token: string }) {
           </div>
           <Switch checked={bill.locked} disabled={busy} label="Lock bill" onChange={(v) => act({ action: "settings", locked: v })} />
         </div>
+        {bill.locked && (
+          <div className="mt-3 space-y-2">
+            {data.smsEnabled && (
+              <TextEveryone
+                count={smsQueue.length}
+                costSatang={smsSegmentCounts.reduce((a, b) => a + b, 0) * SMS_SEGMENT_COST_SATANG}
+                maxSegments={Math.max(0, ...smsSegmentCounts)}
+                linkless={!data.smsLinkBase}
+                busy={busy}
+                onSend={async () => Boolean(await act({ action: "notify" }))}
+              />
+            )}
+            <p className="text-xs text-stone-500">
+              {withContact > 0
+                ? "Text each friend their final amount with the buttons under their name."
+                : "Nobody has left their number yet. Friends can add it on their page after they pick."}
+            </p>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -186,6 +238,7 @@ export default function AdminApp({ token }: { token: string }) {
                 <div className="min-w-0 flex-1">
                   <p className="font-semibold">
                     {p.name}
+                    {contacts[p.id] && <span className="ml-1 text-xs" aria-label="Left their number">📱</span>}
                     {!pickedIds.has(p.id) && (
                       <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">
                         hasn&apos;t picked
@@ -206,6 +259,14 @@ export default function AdminApp({ token }: { token: string }) {
                   {p.paid ? "✓ Paid" : "Unpaid"}
                 </button>
               </div>
+              {bill.locked && !p.paid && contacts[p.id] && (
+                <div className="mt-2 ml-11 space-y-1">
+                  <NotifyButtons contact={contacts[p.id]} text={messageFor(p)} onNotice={flash} />
+                  {data.smsEnabled && (
+                    <SmsStatus log={notified[p.id]} busy={busy} onResend={() => act({ action: "notify", guestIds: [p.id] })} />
+                  )}
+                </div>
+              )}
               <details className="mt-1 ml-11 text-sm">
                 <summary className="cursor-pointer py-1 text-stone-500">
                   {p.lines.length} item{p.lines.length === 1 ? "" : "s"}
@@ -239,8 +300,16 @@ export default function AdminApp({ token }: { token: string }) {
 
       <ItemsCard bill={bill} token={token} aiEnabled={data.aiEnabled} busy={busy} act={act} />
       <SettingsCard bill={bill} busy={busy} act={act} />
-      <GuestList bill={bill} busy={busy} act={act} />
+      <GuestList bill={bill} contacts={contacts} busy={busy} act={act} />
       <PaymentCard bill={bill} busy={busy} act={act} />
+      {notice && (
+        <p
+          role="status"
+          className="fixed inset-x-4 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-30 mx-auto max-w-sm rounded-xl bg-stone-900 px-4 py-3 text-center text-sm font-medium text-white shadow-lg"
+        >
+          {notice}
+        </p>
+      )}
     </main>
   );
 }
@@ -458,9 +527,20 @@ function PaymentCard({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act 
   );
 }
 
-function GuestList({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act }) {
+function GuestList({
+  bill,
+  contacts,
+  busy,
+  act,
+}: {
+  bill: Bill;
+  contacts: Record<string, Contact>;
+  busy: boolean;
+  act: Act;
+}) {
   const [name, setName] = useState("");
   const roster = bill.roster ?? [];
+  const withPhone = roster.filter((g) => contacts[g.id]).length;
   return (
     <Card>
       <h2 className="mb-1 text-lg font-bold">Guest list ({roster.length})</h2>
@@ -472,6 +552,11 @@ function GuestList({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act })
           <li key={g.id} className="flex items-center gap-1.5 rounded-full bg-stone-100 py-1 pr-1 pl-1">
             <Avatars people={[g]} />
             <span className="font-medium">{g.name}</span>
+            {contacts[g.id] && (
+              <span className="text-xs" title="Left their number" aria-label="Left their number">
+                📱
+              </span>
+            )}
             <button
               type="button"
               disabled={busy}
@@ -484,6 +569,9 @@ function GuestList({ bill, busy, act }: { bill: Bill; busy: boolean; act: Act })
           </li>
         ))}
       </ul>
+      <p className="mt-2 text-xs text-stone-500">
+        📱 {withPhone} of {roster.length} left their number on their page, to get a text when the bill is final.
+      </p>
       <form
         className="mt-3 flex gap-2"
         onSubmit={async (e) => {

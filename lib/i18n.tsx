@@ -67,6 +67,18 @@ const en = {
   vatShort: "7% VAT",
   serviceCharge: "Service charge {pct}%",
   vat: "VAT 7%",
+  finalNote: "The bill is final",
+  finalOwe: "You owe {amount}",
+  finalPaid: "You're all paid. Thanks!",
+  payTitle: "Pay {amount}",
+  notifyTitle: "Get a text when the bill is final",
+  notifyHint: "Optional. Only the host sees your number.",
+  phoneLabel: "Mobile number",
+  notifyMe: "Notify me",
+  removePhone: "Remove",
+  cancel: "Cancel",
+  notifySaved: "You'll get a text at {phone} when the bill is final",
+  phoneInvalid: "Enter a Thai mobile number, like 081-234-5678",
 };
 
 type Dict = typeof en;
@@ -135,6 +147,18 @@ const th: Dict = {
   vatShort: "VAT 7%",
   serviceCharge: "ค่าบริการ {pct}%",
   vat: "VAT 7%",
+  finalNote: "บิลนี้สรุปยอดแล้ว",
+  finalOwe: "คุณต้องจ่าย {amount}",
+  finalPaid: "จ่ายครบแล้ว ขอบคุณ!",
+  payTitle: "จ่าย {amount}",
+  notifyTitle: "รับ SMS เมื่อบิลสรุปยอด",
+  notifyHint: "ไม่บังคับ เฉพาะเจ้าภาพเท่านั้นที่เห็นเบอร์ของคุณ",
+  phoneLabel: "เบอร์มือถือ",
+  notifyMe: "แจ้งฉัน",
+  removePhone: "ลบ",
+  cancel: "ยกเลิก",
+  notifySaved: "จะส่ง SMS ไปที่ {phone} เมื่อบิลสรุปยอด",
+  phoneInvalid: "กรอกเบอร์มือถือไทย เช่น 081-234-5678",
 };
 
 export type Lang = "en" | "th";

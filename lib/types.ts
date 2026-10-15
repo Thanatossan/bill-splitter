@@ -29,6 +29,23 @@ export interface Guest {
   name: string;
 }
 
+/**
+ * How the host reaches a guest; the friend enters it on their own page.
+ * Stored apart from the Bill (which anyone with the share link can read) and
+ * only ever returned by the admin API.
+ */
+export interface Contact {
+  /** E.164, e.g. +66812345678. */
+  phone: string;
+}
+
+/** Result of the last automatic SMS to a guest. */
+export interface NotifyLog {
+  at: number;
+  status: "sent" | "failed";
+  error?: string;
+}
+
 export const THEME_COLORS = ["emerald", "teal", "sky", "indigo", "violet", "pink", "rose", "orange"] as const;
 export type ThemeColor = (typeof THEME_COLORS)[number];
 

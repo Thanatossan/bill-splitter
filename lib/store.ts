@@ -1,13 +1,16 @@
 import { Redis } from "@upstash/redis";
 import { promises as fs } from "fs";
 import path from "path";
-import type { Bill, Person } from "./types";
+import type { Bill, Contact, NotifyLog, Person } from "./types";
 
 /**
  * Key layout:
  *   bill:{id}            -> Bill JSON
  *   bill:{id}:people     -> hash personId -> Person JSON (one field per friend,
  *                           so concurrent saves never overwrite each other)
+ *   bill:{id}:contacts   -> hash guestId -> Contact (admin API only, never
+ *                           part of the public bill)
+ *   bill:{id}:notified   -> hash guestId -> NotifyLog (automatic SMS)
  *   admin:{token}        -> bill id
  *
  * Uses Upstash Redis (Vercel Marketplace "Upstash for Redis", the successor of
@@ -22,6 +25,11 @@ interface Store {
   getPerson(billId: string, personId: string): Promise<Person | null>;
   putPerson(billId: string, person: Person): Promise<void>;
   deletePerson(billId: string, personId: string): Promise<void>;
+  getContacts(billId: string): Promise<Record<string, Contact>>;
+  /** Save one guest's contact; null deletes it. */
+  putContact(billId: string, guestId: string, contact: Contact | null): Promise<void>;
+  getNotified(billId: string): Promise<Record<string, NotifyLog>>;
+  putNotified(billId: string, guestId: string, log: NotifyLog): Promise<void>;
   /** Rate-limit counter: current count for `key` (0 if expired/missing). */
   count(key: string): Promise<number>;
   /** Increment `key`; the window starts at the first hit and lasts `ttlSec`. */
@@ -50,6 +58,17 @@ function redisStore(redis: Redis): Store {
     async deletePerson(billId, pid) {
       await redis.hdel(`bill:${billId}:people`, pid);
     },
+    getContacts: async (billId) =>
+      (await redis.hgetall<Record<string, Contact>>(`bill:${billId}:contacts`)) ?? {},
+    async putContact(billId, gid, contact) {
+      if (!contact) await redis.hdel(`bill:${billId}:contacts`, gid);
+      else await redis.hset(`bill:${billId}:contacts`, { [gid]: contact });
+    },
+    getNotified: async (billId) =>
+      (await redis.hgetall<Record<string, NotifyLog>>(`bill:${billId}:notified`)) ?? {},
+    async putNotified(billId, gid, log) {
+      await redis.hset(`bill:${billId}:notified`, { [gid]: log });
+    },
     count: async (key) => (await redis.get<number>(key)) ?? 0,
     async bump(key, ttlSec) {
       const n = await redis.incr(key);
@@ -63,6 +82,8 @@ interface FileDB {
   bills: Record<string, Bill>;
   admin: Record<string, string>;
   people: Record<string, Record<string, Person>>;
+  contacts?: Record<string, Record<string, Contact>>;
+  notified?: Record<string, Record<string, NotifyLog>>;
 }
 
 function fileStore(file: string): Store {
@@ -103,6 +124,18 @@ function fileStore(file: string): Store {
     deletePerson: (billId, pid) =>
       mutate((db) => {
         delete db.people[billId]?.[pid];
+      }),
+    getContacts: async (billId) => (await read()).contacts?.[billId] ?? {},
+    putContact: (billId, gid, contact) =>
+      mutate((db) => {
+        const all = ((db.contacts ??= {})[billId] ??= {});
+        if (!contact) delete all[gid];
+        else all[gid] = contact;
+      }),
+    getNotified: async (billId) => (await read()).notified?.[billId] ?? {},
+    putNotified: (billId, gid, log) =>
+      mutate((db) => {
+        ((db.notified ??= {})[billId] ??= {})[gid] = log;
       }),
     async count(key) {
       const c = counters.get(key);

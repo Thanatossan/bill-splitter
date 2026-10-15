@@ -15,7 +15,8 @@ A mobile-first web app for splitting a restaurant bill. You create a bill, send 
   - see unclaimed items and a live check against the receipt
   - edit everything: items, charges, tip, theme, guest list, payment details
   - lock the bill
-- **Friends**: `/b/<shareId>`. No login. They tap their name, and the choice is remembered on their phone so they can come back and edit.
+  - see who left their mobile number, then text everyone their final amount in one tap each, or all at once automatically (see [SMS](#sms))
+- **Friends**: `/b/<shareId>`. No login. They tap their name, and the choice is remembered on their phone so they can come back and edit. After saving their picks they can leave their mobile number to get a text when the bill is final (optional; only the host sees it). A personal link `/b/<shareId>?me=<guestId>` opens straight to that friend's total. Once the bill is locked, friends see a "You owe ฿X" banner with the PromptPay QR, and the browser tab reads `✅ Pay ฿X`.
 
 Built with Next.js 16 (App Router), TypeScript, Tailwind v4, Upstash Redis (the Vercel Marketplace successor to Vercel KV), and the Claude API for receipt scanning.
 
@@ -37,7 +38,10 @@ All math is in integer **satang** (`lib/money.ts`) and covered by tests (`tests/
 | --- | --- |
 | `bill:{shareId}` | `Bill` – title, date, receipt total, items, extra, lock, payment info, admin token |
 | `bill:{shareId}:people` | Redis hash `personId → Person {name, unitIds[], paid}`. One field per friend, so concurrent saves never clobber each other. |
+| `bill:{shareId}:contacts` | Redis hash `personId → Contact {phone}`. Written by the friend (`PUT /api/b/{shareId}/people/{personId}/contact`, write-only), read only by the admin API. Never part of `Bill`, so the share link can't leak it. |
+| `bill:{shareId}:notified` | Redis hash `guestId → NotifyLog {at, status, error}` for automatic SMS |
 | `admin:{token}` | `shareId` |
+| `rl:sms:{shareId}` | SMS sent for this bill in the last 24 hours (spend cap) |
 
 Bills also carry a **guest list** (`roster`: `{id, name}[]`; ids are `guest-01`, `guest-02`, …). A guest's saved `Person` uses the same id, so picking a name on two phones edits the same record. "Shared by everyone" items are split across the whole guest list, including people who haven't picked yet. The guest list for Table A1 is in `lib/seed-data.ts`, and the host can add or remove names from the admin page.
 
@@ -51,6 +55,9 @@ lib/receipt.ts           paste-text receipt parser + category guessing
 lib/scan.ts              receipt photo → items with Claude (structured output)
 lib/validate.ts          server-side checks for bills, items, guests, settings
 lib/host-auth.ts         host passcode + rate limiting
+lib/phone.ts             Thai mobile numbers → +66…
+lib/notify.ts            "bill is final" message, SMS segment count, who to text
+lib/sms.ts               Twilio REST client (swap this file to change provider)
 lib/store.ts             Upstash Redis store, falls back to .data/db.json locally
 lib/host-storage.ts      host's saved details + "My bills" (localStorage)
 lib/theme.ts             accent colors
@@ -62,7 +69,7 @@ app/admin/[token]/       host page
 app/b/[shareId]/         friend page
 app/api/...              route handlers (bills, scan, host, admin, friends)
 scripts/seed.ts          optional Table A1 sample bill
-tests/                   vitest (money + receipt parser)
+tests/                   vitest (money, receipt parser, notify, sms)
 ```
 
 ## Local development
@@ -87,6 +94,12 @@ Without Redis env vars, data is stored in `.data/db.json`, so no setup is needed
 | `SCAN_MODEL` | Optional. `claude-sonnet-5-5` (default, ~2–3¢ per scan), `claude-haiku-5-5` (~0.1–0.2¢, fine for clean receipts) or `claude-opus-5-5` (~5¢, best on hard photos). |
 | `USE_REDIS` | Set to `1` to make `npm run dev` use Redis. By default dev uses `.data/db.json`, even though `vercel env pull` puts production Redis credentials in `.env.local`. |
 | `APP_URL` | Optional, only used by `npm run seed` to print full links |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional. Turns on automatic SMS (with a sender below). Without them the "Text everyone" button is hidden; the one-tap SMS buttons work regardless. |
+| `TWILIO_MESSAGING_SERVICE_SID` | Preferred sender: a Messaging Service holding your registered sender ID |
+| `TWILIO_FROM` | Alternative sender: an approved alphanumeric sender ID or number |
+| `SMS_LINK_BASE_URL` | Optional. Domain used for links in SMS (e.g. `https://split.example`). Must be the exact domain Twilio approved. Defaults to the domain the admin page was opened on. |
+| `SMS_LINKS` | Set to `off` to send SMS without a link (until link approval comes through) |
+| `SMS_HOST_NAME` | Optional. Name used in link-less SMS: "Open the bill link from Siva." |
 
 ## Deploy to Vercel
 
@@ -104,6 +117,25 @@ Without Redis env vars, data is stored in `.data/db.json`, so no setup is needed
 6. When everyone has picked and nothing is unclaimed, **lock** the bill and toggle people to paid as transfers arrive.
 
 > The deployed app refuses to start without Redis, because Vercel's filesystem is read-only. That's intentional.
+
+## SMS
+
+Friends leave their own mobile number on their page after picking (the host never types numbers). The number is remembered on the friend's phone to pre-fill their next bill. The host sees 📱 next to everyone who left one.
+
+Once the bill is locked, the admin page offers two ways to tell friends what they owe:
+
+1. **One-tap buttons (free)** under each person with a number: **SMS** opens the host's Messages app with the text filled in. **Share…** opens the share sheet (or copies the text).
+2. **Automatic SMS via Twilio** (about ฿1 per SMS): **Text everyone** shows the number of people and the estimated cost, and asks you to confirm. Each friend gets their own amount, calculated on the server, and their personal `?me=` link. Each row then shows "✓ Texted 20:14" with **Resend**, or the error with **Retry**. Guests who have paid, owe nothing, or were already texted are skipped. Each bill can send at most 3 × the number of guests (minimum 10) per 24 hours. Texts are sent only when you tap the button, never just because the bill was locked.
+
+Messages are ASCII ("Table A1 is final. Ann owes THB 1,240. Pay: https://…"), so they fit one 160-character SMS. A Thai name or title switches the SMS to UCS-2 (70 characters per part), which roughly doubles the cost, and the estimate shows that.
+
+### Twilio setup for Thailand (start early, it takes weeks)
+
+- **Register a sender ID.** Twilio blocks unregistered alphanumeric senders to Thailand. Numeric senders are only delivered on a best-effort basis.
+- **Get every URL approved.** Email `senderid@twilio.com` with the full link domain. Short links are prohibited. NBTC asks for company name, registration number, business type and a Letter of Authorisation, which can block a personal (non-company) account. Approval reportedly takes about 2 weeks. Until then, set `SMS_LINKS=off`; the text then says to open the link from the group chat.
+- Use a stable custom domain for `SMS_LINK_BASE_URL`, not a `*.vercel.app` URL that might change.
+- A trial account can only text verified numbers and adds a "Sent from your Twilio trial account" prefix. Test with your own number, then upgrade.
+- Fallback provider: ThaiBulkSMS says it registers sender names without documents. Switching means rewriting `sendSms` / `smsEnabled` in `lib/sms.ts`.
 
 ## Notes
 
